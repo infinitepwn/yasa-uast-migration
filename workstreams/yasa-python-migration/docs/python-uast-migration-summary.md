@@ -1,6 +1,6 @@
 # Python UAST 迁移与构建问题总结
 
-## 1. 项目目标
+## 项目目标
 
 本次工作将 Python 的 UAST 生成方式从旧版外部 `uast4py` 二进制迁移到基于 Tree-sitter 的实现。
 
@@ -18,76 +18,17 @@ Python 源码 → web-tree-sitter → tree-sitter-python.wasm → Python UAST
 
 新的 Python parser 在 engine 内部直接运行，不再依赖 `uast4py`。
 
-## 2. WASM 是什么
+先尝试用官方仓库构建engine
 
-WASM 是 WebAssembly 的缩写，是一种可以被 JavaScript、Node.js 和浏览器执行的低层字节码格式。
+## Build.sh的使用
 
-在本项目中，Tree-sitter 的 Python 语法分析器被编译成：
+一开始用官方仓库，直接运行build.sh
 
-```text
-tree-sitter-python.wasm
-```
+### 旧版依赖安装与 `uast4py` 问题
 
-`web-tree-sitter` 加载这个文件后，可以把 Python 源码解析成语法树，再由 Python parser 转换成项目使用的 UAST。
+<img src="https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260927234103501.png" alt="image-20260927234103501" style="zoom:50%;" />
 
-WASM 不是 UAST，也不是最终 AST。它主要提供语法分析能力；`parser.ts` 和 `visitor.ts` 负责把 Tree-sitter 的语法树转换成项目定义的 UAST 节点。
-
-## 3. CST、AST 和 UAST 的关系
-
-大致流程如下：
-
-```text
-源代码
-  ↓
-Tree-sitter CST/语法树
-  ↓ Visitor 遍历和转换
-语言 AST/UAST 节点
-  ↓
-YASA 分析器、规则和污点传播
-```
-
-Python 的 `parser.ts` 不只是加载语法树。它还负责节点映射、字段转换、位置信息、父子关系和 UAST 类型构造，因此可以认为它承担了从 Tree-sitter 语法树到项目 UAST 的转换工作。
-
-PHP 的 parser 使用 `@ant-yasa/uast-parser-php`，转换逻辑主要封装在 PHP parser 包内部，所以 engine 中的 `php-ast-builder.ts` 看起来较短。
-
-## 4. Python parser 与 PHP parser 的调用方式
-
-原先两者的 import 方式不同：
-
-```ts
-// PHP
-import * as TreeSitter from 'web-tree-sitter'
-
-// Python
-import { Parser as TreeParser, Language, type Node as SyntaxNode } from 'web-tree-sitter'
-```
-
-Python 已按 PHP 的方式统一为命名空间导入，并使用：
-
-```ts
-await TreeSitter.Parser.init()
-TreeSitter.Language.load(...)
-new TreeSitter.Parser()
-```
-
-这样可以统一初始化方式，也减少不同 parser 之间的调用差异。
-
-## 5. 为什么迁移后速度可能快一倍
-
-旧版 Python parser 每次解析通常需要：
-
-1. 创建临时 Python 文件；
-2. 启动外部 `uast4py` 进程；
-3. 通过文件或进程输出读取 JSON；
-4. 再把 JSON 转成 engine 内部对象。
-
-新版 parser 在 Node.js 进程内加载一次 WASM grammar，之后直接解析内存中的源码。它减少了进程启动、临时文件、序列化和反序列化开销，因此在大量小文件场景下可能明显更快。
-
-实际性能仍取决于文件数量、规则执行、worker 数量、缓存和机器环境，不能只根据单个样本断言固定提升一倍。
-
-旧版依赖安装与 `uast4py` 问题
-
-旧版 `YASA-Engine` 的 Python parser 依赖外部二进制：
+这是因为旧版 `YASA-Engine` 的 Python parser 依赖外部二进制：
 
 ```text
 deps/uast4py/uast4py
@@ -100,22 +41,23 @@ uast4go
 uast4py
 ```
 
-脚本没有执行权限时可以这样运行：
+运行
 
 ```bash
 bash install_deps.sh
 ```
 
-也可以补充执行权限：
-
-```bash
-chmod +x install_deps.sh
-./install_deps.sh
-```
-
 在迁移后的 Python parser 中不需要再下载 `uast4py`。如果日志出现 `uast4go binary not found`，那是 Go parser 的旧外部依赖，与 Python UAST 无关。
 
-## 8. `npm test-all` 执行哪些测试
+### 测试出错
+
+但是运行完install_deps.sh后还是出错
+
+![image-20260927234217310](https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260927234217310.png)
+
+这是因为build.sh里会运行
+
+![image-20260927233834213](https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260927233834213.png)
 
 `npm run test-all` 读取 `engine/package.json` 中的脚本，并按 `&&` 顺序执行：
 
@@ -138,67 +80,37 @@ test-callchain
 test-php
 ```
 
-其中任意一个测试失败，后面的测试不会继续执行。Java SARIF 测试需要先准备 benchmark：
+其中任意一个测试失败，后面的测试不会继续执行。而原仓库缺少java的benchmark
+
+Java SARIF 测试需要先准备 benchmark：
 
 ```bash
 npx tsx test/java/prepare-java-benchmark.ts
 ```
 
-因此，`test-all` 失败不一定说明 Python parser 失败，也可能是 Go、Java、PHP 或测试资源问题。
+这样就可以通过测试了
 
-## 9. 构建流程
+### 缺少rosetta
 
-迁移 engine 的构建流程大致为：
+<img src="https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260927234400562.png" alt="image-20260927234400562" style="zoom: 33%;" />
 
-```text
-安装依赖
-  ↓
-准备 native addon
-  ↓
-patch PHP WASM 资源
-  ↓
-TypeScript 类型检查
-  ↓
-运行全部测试
-  ↓
-tsc 编译到 dist
-  ↓
-pkg 打包
-  ↓
-清理 dist
-```
+还是打包失败
 
-`npx tsc --noEmit` 只做类型检查，不生成文件；`npx tsc` 才会把 TypeScript 编译到 `dist`。
-
-如果构建在测试阶段失败，后面的编译和清理步骤不会执行。因此失败后可以手动删除：
-
-```bash
-rm -rf dist
-```
-
-## 10. pkg 打包问题
-
-在 Apple Silicon 上打包多个目标时，项目配置通常包括：
+这是因为在 Apple Silicon 上打包多个目标时，项目配置通常包括：
 
 ```text
-node18-macos-arm64
-node18-macos-x64
-node18-linux-x64
+node18-macos-arm64 node18-macos-x64 node18-linux-x64
 ```
 
-如果在 arm64 Mac 上出现：
-
-```text
-spawn Unknown system error -86
-```
-
-通常表示打包过程需要启动 x86_64 进程，但机器没有 Rosetta 2。可以安装：
+这里报错spawn Unknown system error -86，通常表示打包过程需要启动 x86_64 进程，但机器没有 Rosetta 2。可以安装：
 
 ```bash
 softwareupdate --install-rosetta --agree-to-license
 ```
 
-`pkg` 输出的 `prebuild-install` 和 `fs.R_OK deprecated` 多数是警告，不一定导致失败。
+然后就可以运行打包成功了
+
+![image-20260927234620619](https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260927234620619.png)
 
 PHP WASM 如果直接使用裸的 `npx pkg .`，可能被 pkg 按文本处理，运行时出现：
 
@@ -208,22 +120,52 @@ WebAssembly.instantiate(): unknown section code #0x3d
 
 应使用项目的 `build.sh`，因为它会先执行 PHP WASM patch。
 
-## 11. Python parser 初始化问题
+迁移 engine 的构建流程大致为：
 
-Python parser 的解析接口是同步的，但 WASM 加载是异步的：
-
-```ts
-await PythonParser.ensureInitialized()
-PythonParser.parseSingleFile(...)
+```mermaid
+flowchart LR
+    A[安装依赖] --> B[准备 native addon]
+    B --> C[Patch PHP WASM 资源]
+    C --> D[TypeScript 类型检查]
+    D --> E[运行全部测试]
+    E --> F[tsc 编译到 dist]
+    F --> G[pkg 打包]
+    G --> H[清理 dist]
 ```
 
-如果只在 worker 中初始化，CLI 的 `--dumpAST` 或某些单文件路径仍可能报：
+`npx tsc --noEmit` 只做类型检查，不生成文件；`npx tsc` 才会把 TypeScript 编译到 `dist`。
 
-```text
-Python parser not initialized. Call ensureInitialized() first.
-```
+### 测试php
 
-最终采用的修复方式是在统一 parser 入口增加：
+![image-20260927234835040](https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260927234835040.png)
+
+测试php的dumpast，报错，但是java就可以
+
+![image-20260927234910751](https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260927234910751.png)
+
+可以从日志里找问题
+
+![image-20260927235002855](https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260927235002855.png)
+
+可以看到是没有进行初始化，那为什么其他语言可以？
+
+在各个语言的ast-build.ts文件里
+
+![image-20260927235130379](https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260927235130379.png)
+
+![image-20260927235208313](https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260927235208313.png)
+
+可以看到php会多一步初始化，这是因为php的uast是利用tree-sitter实现的，得先调用里面的wasm文件
+
+但是在interface接口这边的start.ts中可以看到
+
+![image-20260928000157570](https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260928000157570.png)
+
+都是直接从parseSingleFile开始的，没有初始化
+
+最终采用的修复方式是在统一 parser 入口parser.ts增加：
+
+![image-20260928000022237](https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260928000022237.png)
 
 ```ts
 async function ensureInitialized(language?: string): Promise<void> {
@@ -243,26 +185,41 @@ async function ensureInitialized(language?: string): Promise<void> {
 await Parser.ensureInitialized(Config.language)
 ```
 
-这样覆盖普通分析、单文件分析和 `--dumpAST`。worker 内仍保留初始化逻辑，因为 worker 是独立 Node.js 进程。
+然后就可以使用了
 
-## 12. 当前验证结果
+![image-20260928000557106](https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260928000557106.png)
 
-Python 相关验证已经通过：
+## 迁移python
 
-```text
-npx tsc --noEmit       通过
-npx tsc                通过
-Python tree-sitter     通过
-FastAPI Python 测试    通过
-```
+解决这个问题之后，我们开始迁移python
 
-测试结果为：
+###  仿写parser.ts
 
-```text
-9 passing, 1 pending
-```
+![image-20260928001148015](https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260928001148015.png)
 
-重新构建后应使用新产物验证：
+![image-20260928000917266](https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260928000917266.png)
+
+模仿php可以写一个parser.ts，这里有一个和php不一样的地方，这里我们读取wasm是用拼接路径的方式，这是因为
+
+php这种写法会导致pkg把wasm按utf-8来识别
+
+原本仓库是在build里专门处理了这个问题，但如果按我们这样写就不需要了
+
+![image-20260928001053622](https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260928001053622.png)
+
+然后我们把php中后续把cst转化成uast的部分，拆分到了vistor.ts当中
+
+### Enigine中修改ast-builder.ts
+
+![image-20260928001433086](https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260928001433086.png)
+
+这一块也直接放照php就行，原本这里是调用uastpy的
+
+![image-20260928001543196](https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260928001543196.png)
+
+### 测试可用性
+
+可以用这些命令来测试
 
 ```bash
 cd ~/Downloads/yasa-uast-migration/engine
@@ -273,3 +230,13 @@ cd ~/Downloads/yasa-uast-migration/engine
   --language python \
   --dumpAST
 ```
+
+### 性能
+
+原始的调用uast4py太慢了，需要2s
+
+![image-20260928001709424](https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260928001709424.png)
+
+修改完之后非常迅速
+
+![image-20260928001818053](https://raw.githubusercontent.com/infinitepwn/note_picbed/main/image-20260928001818053.png)
